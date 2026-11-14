@@ -751,6 +751,30 @@ class _StatsForecast:
             )
         X = X[[self.id_col, self.time_col] + self._exog]
         processed = ufp.process_df(X, self.id_col, self.time_col, None)
+        # `process_df` groups X in X's own id order, which need not match the order the
+        # training data was grouped in: a categorical id column sorts by category order
+        # while the same ids as plain strings sort alphabetically. The models then consume
+        # the two GroupedArrays positionally, so a mismatch hands one series' future
+        # exogenous values to another series -- silently, with no error. Align X to the
+        # training order before returning it.
+        processed_uids = np.asarray(processed.uids)
+        if not np.array_equal(processed_uids, self.uids):
+            position = {uid: i for i, uid in enumerate(np.asarray(self.uids).tolist())}
+            # x_group_for_train_group[k] = the X group holding self.uids[k]
+            x_group_for_train_group = np.array(
+                [position[uid] for uid in processed_uids.tolist()], dtype=np.int64
+            )
+            inverse = np.empty_like(x_group_for_train_group)
+            inverse[x_group_for_train_group] = np.arange(len(x_group_for_train_group))
+            sizes = np.diff(processed.indptr)
+            rows = np.concatenate(
+                [
+                    np.arange(processed.indptr[j], processed.indptr[j + 1])
+                    for j in inverse
+                ]
+            )
+            indptr = np.concatenate([[0], np.cumsum(sizes[inverse])])
+            processed = processed._replace(data=processed.data[rows], indptr=indptr)
         return GroupedArray(processed.data, processed.indptr), level
 
     def _validate_exog(self, X_df: Optional[DataFrame] = None) -> None:

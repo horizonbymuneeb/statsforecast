@@ -1639,3 +1639,43 @@ def test_future_exog_column_order(n_jobs, as_polars, method):
     np.testing.assert_allclose(
         result["LinearRegression"].to_numpy(), df.loc[df.ds >= 17, "y"]
     )
+
+
+@pytest.mark.parametrize("method", ["forecast", "fit_predict", "predict"])
+def test_future_exog_with_categorical_id_order(method):
+    # A categorical id column sorts by category order, a plain one alphabetically. The
+    # future frame is grouped on its own, so an unaligned GroupedArray handed one series'
+    # exogenous values to another. The forecasts must not depend on the id dtype.
+    rows = []
+    for uid, base, slope in (("a", 10.0, 2.0), ("b", 100.0, 3.0)):
+        for i in range(6):
+            x = 10.0 * i
+            rows.append({"unique_id": uid, "ds": i, "y": base + slope * x, "x": x})
+    df = pd.DataFrame(rows)
+    future = pd.DataFrame(
+        {
+            "unique_id": ["a", "a", "b", "b"],
+            "ds": [6, 7, 6, 7],
+            "x": [40.0, 50.0, 10.0, 20.0],
+        }
+    )
+    categorical = df.copy()
+    # reverse the category order so the training groups and the future groups disagree
+    categorical["unique_id"] = pd.Categorical(categorical["unique_id"], categories=["b", "a"])
+
+    results = []
+    for train in (df, categorical):
+        sf = StatsForecast(models=[SklearnModel(LinearRegression())], freq=1, n_jobs=1)
+        if method == "predict":
+            result = sf.fit(train).predict(h=2, X_df=future)
+        else:
+            result = getattr(sf, method)(df=train, h=2, X_df=future)
+        # sort on the string value: a categorical id sorts by category order, which would
+        # reorder the rows and hide (or fake) the very misalignment this test is about
+        result = result.assign(unique_id=result["unique_id"].astype(str))
+        result = result.sort_values(["unique_id", "ds"]).reset_index(drop=True)
+        results.append(result["LinearRegression"].to_numpy())
+
+    # series a follows 10 + 2x, series b follows 100 + 3x
+    np.testing.assert_allclose(results[0], np.array([90.0, 110.0, 130.0, 160.0]))
+    np.testing.assert_allclose(results[1], results[0])
